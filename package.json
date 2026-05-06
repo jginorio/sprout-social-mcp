@@ -1,5 +1,5 @@
 {
-  "name": "sprout-social-mcp",
+  "name": "@community/sprout-social-mcp",
   "version": "1.0.0",
   "description": "A Model Context Protocol (MCP) server for the Sprout Social API. Provides tools for social media analytics, post management, publishing, and more.",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
     "ai",
     "llm"
   ],
-  "author": "Platea",
+  "author": "Jaime Ginorio",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
