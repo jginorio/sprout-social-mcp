@@ -1,7 +1,7 @@
 {
   "name": "sprout-social-mcp",
   "version": "1.0.0",
-  "description": "A Model Context Protocol (MCP) server for the Sprout Social API. Provides tools for social media analytics, post management, publishing, and more.",
+  "description": "Unofficial community MCP server for the Sprout Social API — use it while Sprout Social works on their official one. Provides tools for social media analytics, post management, publishing, and more.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {

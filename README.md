@@ -1,5 +1,7 @@
 # Sprout Social MCP Server
 
+> **Note:** This is an unofficial, community-built MCP server to use while Sprout Social works on releasing their official one.
+
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for the [Sprout Social API](https://api.sproutsocial.com/docs/). It lets AI assistants (Claude, Cursor, Devin, etc.) access your Sprout Social data — analytics, publishing, messages, listening, and more — through a standardized interface.
 
 ## Quick Start
