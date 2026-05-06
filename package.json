@@ -1,5 +1,5 @@
 {
-  "name": "@community/sprout-social-mcp",
+  "name": "@jginorio/sprout-social-mcp",
   "version": "1.0.0",
   "description": "A Model Context Protocol (MCP) server for the Sprout Social API. Provides tools for social media analytics, post management, publishing, and more.",
   "main": "dist/index.js",
