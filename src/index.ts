@@ -223,9 +223,12 @@ server.tool(
     metrics: z
       .array(z.string())
       .describe(
-        "Metrics to retrieve. Valid options: 'lifetime.impressions', 'lifetime.engagements', " +
-          "'lifetime.reactions', 'lifetime.video_views'. " +
-          "Do NOT request: 'lifetime.comments', 'lifetime.shares', 'lifetime.reach' (these are invalid)."
+        "Metrics to retrieve. " +
+          "All platforms: 'lifetime.impressions', 'lifetime.engagements', 'lifetime.reactions', " +
+          "'lifetime.video_views', 'lifetime.saves', 'lifetime.comments_count', 'lifetime.post_shares_count'. " +
+          "Facebook only: 'lifetime.post_link_clicks', 'lifetime.post_content_clicks', 'lifetime.post_content_clicks_other'. " +
+          "Instagram: click metrics are NOT available (silently ignored by the API). " +
+          "INVALID (will error): 'lifetime.reach', 'lifetime.comments', 'lifetime.shares'."
       ),
     created_time_start: z
       .string()

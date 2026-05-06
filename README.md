@@ -163,10 +163,25 @@ Ask: "Get all Instagram post analytics for last week"
 
 ### Valid Post-Level Metrics
 
+**All platforms (Instagram, Facebook, LinkedIn, TikTok, etc.):**
+
 - `lifetime.impressions` — total views
 - `lifetime.engagements` — total engagement (likes, comments, shares, saves)
 - `lifetime.reactions` — reactions only
 - `lifetime.video_views` — video view count
+- `lifetime.saves` — saves/bookmarks
+- `lifetime.comments_count` — comment count
+- `lifetime.post_shares_count` — share count
+
+**Facebook only:**
+
+- `lifetime.post_link_clicks` — clicks on links in the post
+- `lifetime.post_content_clicks` — total clicks on post content
+- `lifetime.post_content_clicks_other` — other content clicks
+
+> **Platform limitations:**
+> - **Reach** (`lifetime.reach`) is NOT available at the post level — only at the profile level via `get_profile_analytics`. This is a Sprout Social API limitation.
+> - **Click metrics** are only available for Facebook posts. For Instagram, the API silently ignores them (no error, but no data returned).
 
 **Invalid metrics** (will cause errors): `lifetime.comments`, `lifetime.shares`, `lifetime.reach`
 
