@@ -105,7 +105,7 @@ In Devin's MCP settings, add a new server:
 | `get_client` | Get your Sprout Social customer IDs and names |
 | `get_profiles` | List all connected social profiles |
 | `get_groups` | List all groups |
-| `get_tags` | List all tags |
+| `get_tags` | List tags, with optional filters for active status, group, type, or name |
 | `get_users` | List all users |
 | `get_topics` | List all listening topics |
 | `get_teams` | List all teams |
@@ -116,7 +116,8 @@ In Devin's MCP settings, add a new server:
 | Tool | Description |
 |---|---|
 | `get_profile_analytics` | Profile-level analytics (impressions, engagements, etc.) for a date range |
-| `get_post_analytics` | Post-level analytics with pagination. Supports impressions, engagements, reactions, video views |
+| `get_post_analytics` | Post-level analytics with pagination. Supports impressions, engagements, reactions, video views, and tag filters |
+| `get_tag_performance` | Tag Performance Report-style rollup: automatically pull tagged posts and aggregate lifetime metrics by tag |
 
 ### Messages
 
@@ -185,6 +186,39 @@ Ask: "Get all Instagram post analytics for last week"
 
 **Invalid metrics** (will cause errors): `lifetime.comments`, `lifetime.shares`, `lifetime.reach`
 
+### Tag Performance (replaces exporting a tag report)
+
+Sprout has no dedicated tag-analytics endpoint. Tag data lives on posts (`internal.tags.id`) and can be combined with post metrics to reproduce the Tag Performance Report.
+
+`get_tag_performance` does that automatically:
+
+1. Resolves tag names/IDs via `get_tags` metadata
+2. Pages through tagged posts in the date range
+3. Aggregates lifetime metrics per tag (impressions, engagements, engagement rate, reactions, comments, shares, saves, video views, Facebook link clicks)
+4. Returns top posts for each tag, and optionally a per-network breakdown
+
+```
+Ask: "How did the campaign and launch tags perform on Instagram last month?"
+→ get_profiles (for Instagram customer_profile_id)
+→ get_tag_performance with tag_names ["campaign", "launch"]
+```
+
+**Behavior notes:**
+
+- A post with multiple tags contributes its **full** lifetime metrics to each tag — the same method Sprout uses in the Tag Performance Report.
+- If `tag_ids` / `tag_names` are omitted, every tagged post in the window is rolled up.
+- Ambiguous tag names return candidate IDs instead of guessing. Use `get_tags` (`search`, `active_only`, `group_id`) to pick the right ID.
+- Stories often inflate post counts and dilute engagement rate. Pass `exclude_post_types: ["INSTAGRAM_STORY"]` when you want feed/reel performance only.
+- Responses set `truncated: true` if `max_pages` stopped before all post pages were fetched (50 posts per page).
+
+You can also filter raw posts without aggregating:
+
+```
+get_post_analytics(..., tag_ids: ["12345"], tagged_only: true)
+```
+
+The filter uses `internal.tags.id.eq(...)` / `internal.tags.id.exists(true)` on the Posts Analytics API. `tag_id.eq(...)` is **not** valid on that endpoint.
+
 ### Finding Profile IDs
 
 Use `get_profiles` first to discover your `customer_profile_id` values, then pass them to analytics or publishing tools.
@@ -196,6 +230,7 @@ git clone https://github.com/jginorio/sprout-social-mcp.git
 cd sprout-social-mcp
 npm install
 npm run build
+npm test
 ```
 
 To test locally:
