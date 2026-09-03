@@ -94,7 +94,7 @@ In Devin's MCP settings, add a new server:
 | Variable | Required | Description |
 |---|---|---|
 | `SPROUT_SOCIAL_API_KEY` | Yes | Your Sprout Social API token |
-| `SPROUT_SOCIAL_CUSTOMER_ID` | Yes | Your Sprout Social customer ID |
+| `SPROUT_SOCIAL_CUSTOMER_ID` | If the token sees more than one customer | Your Sprout Social customer ID. Optional when the token has access to exactly one customer — the server reads it from `/metadata/client`. |
 
 ## Available Tools
 
@@ -155,11 +155,20 @@ In Devin's MCP settings, add a new server:
 
 ### Post Analytics Pagination
 
-The Sprout Social API paginates post analytics. Always check `paging.total_pages` in the response and request all pages:
+The Sprout Social API paginates post analytics (50 posts per page). `get_post_analytics` can follow that for you:
+
+- `all_pages: true` — fetch pages automatically (default cap `max_pages: 40`) and return one combined `data` array. `paging.truncated` is true if more pages remain.
+- `page` — fetch a single page yourself.
+- `guid_cursor` — walk past the ~10k page-number cap. Pass the last `guid` (or `paging.next_guid_cursor`) and keep going until a page is empty. Combine with `all_pages` to follow the cursor automatically.
+
+`sort` (e.g. `['lifetime.impressions:desc']`) and `timezone` (ICANN name for the date filter; response times stay UTC) are also supported. Cursor mode always sorts by `guid:asc`. Requests retry on 429/5xx and pause briefly between pages.
 
 ```
 Ask: "Get all Instagram post analytics for last week"
-→ Tool calls get_post_analytics with page=1, then page=2, etc.
+→ get_post_analytics with all_pages=true
+
+Ask: "Top posts by impressions last month"
+→ get_post_analytics with sort=['lifetime.impressions:desc']
 ```
 
 ### Valid Post-Level Metrics
