@@ -198,9 +198,9 @@ Sprout has no dedicated tag-analytics endpoint. Tag data lives on posts (`intern
 4. Returns top posts for each tag, and optionally a per-network breakdown
 
 ```
-Ask: "How did the findit and housing tags perform on Instagram last month?"
+Ask: "How did the campaign and launch tags perform on Instagram last month?"
 → get_profiles (for Instagram customer_profile_id)
-→ get_tag_performance with tag_names ["findit", "housing"]
+→ get_tag_performance with tag_names ["campaign", "launch"]
 ```
 
 **Behavior notes:**
@@ -214,7 +214,7 @@ Ask: "How did the findit and housing tags perform on Instagram last month?"
 You can also filter raw posts without aggregating:
 
 ```
-get_post_analytics(..., tag_ids: ["4275944"], tagged_only: true)
+get_post_analytics(..., tag_ids: ["12345"], tagged_only: true)
 ```
 
 The filter uses `internal.tags.id.eq(...)` / `internal.tags.id.exists(true)` on the Posts Analytics API. `tag_id.eq(...)` is **not** valid on that endpoint.
