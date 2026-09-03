@@ -3,6 +3,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import {
+  aggregateTagPerformance,
+  filterTags,
+  resolveTagNames,
+  type AnalyticsPost,
+  type TagMeta,
+} from "./tag-performance.js";
 
 const SPROUT_API_BASE = "https://api.sproutsocial.com";
 
@@ -80,9 +87,103 @@ async function sproutMetadataRequest(path: string): Promise<unknown> {
   return response.json();
 }
 
+const DEFAULT_POST_METRICS = [
+  "lifetime.impressions",
+  "lifetime.engagements",
+  "lifetime.reactions",
+  "lifetime.video_views",
+  "lifetime.saves",
+  "lifetime.comments_count",
+  "lifetime.post_shares_count",
+  "lifetime.post_link_clicks",
+];
+
+const DEFAULT_POST_FIELDS = [
+  "created_time",
+  "perma_link",
+  "text",
+  "post_type",
+  "network",
+  "customer_profile_id",
+  "guid",
+  "internal.tags.id",
+];
+
+type PostsAnalyticsResponse = {
+  data?: AnalyticsPost[];
+  paging?: {
+    current_page?: number;
+    total_pages?: number;
+  };
+};
+
+async function fetchTagMetadata(): Promise<TagMeta[]> {
+  const data = (await sproutRequest("GET", "/metadata/customer/tags")) as {
+    data?: TagMeta[];
+  };
+  return data.data ?? [];
+}
+
+async function fetchPostAnalyticsPage(body: Record<string, unknown>) {
+  return (await sproutRequest(
+    "POST",
+    "/analytics/posts",
+    body
+  )) as PostsAnalyticsResponse;
+}
+
+async function fetchPostAnalyticsPages(options: {
+  body: Record<string, unknown>;
+  startPage?: number;
+  maxPages: number;
+}): Promise<{
+  posts: AnalyticsPost[];
+  pagesFetched: number;
+  pagesAvailable: number;
+  truncated: boolean;
+}> {
+  const startPage = options.startPage ?? 1;
+  const first = await fetchPostAnalyticsPage({
+    ...options.body,
+    page: startPage,
+  });
+  const posts = [...(first.data ?? [])];
+  const pagesAvailable = first.paging?.total_pages ?? 1;
+  const lastPage = Math.min(pagesAvailable, startPage + options.maxPages - 1);
+
+  for (let page = startPage + 1; page <= lastPage; page++) {
+    const next = await fetchPostAnalyticsPage({
+      ...options.body,
+      page,
+    });
+    posts.push(...(next.data ?? []));
+  }
+
+  const pagesFetched = Math.max(0, lastPage - startPage + 1);
+  return {
+    posts,
+    pagesFetched,
+    pagesAvailable,
+    truncated: lastPage < pagesAvailable,
+  };
+}
+
+function parseTagIds(values?: Array<string | number>): number[] {
+  if (!values || values.length === 0) return [];
+  const ids: number[] = [];
+  for (const value of values) {
+    const id = typeof value === "number" ? value : Number(String(value).trim());
+    if (!Number.isFinite(id)) {
+      throw new Error(`Invalid tag_id: ${value}`);
+    }
+    ids.push(id);
+  }
+  return ids;
+}
+
 const server = new McpServer({
   name: "Sprout Social MCP",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 // ─── Customer Metadata Tools ────────────────────────────────────────────────
@@ -119,11 +220,40 @@ server.tool(
 
 server.tool(
   "get_tags",
-  "List all tags in your Sprout Social account.",
-  {},
-  async () => {
-    const data = await sproutRequest("GET", "/metadata/customer/tags");
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  "List message/post tags in your Sprout Social account. Optionally filter by active status, group, type (LABEL or CAMPAIGN), or name search. Use these tag_id values with get_tag_performance and get_post_analytics.",
+  {
+    active_only: z
+      .boolean()
+      .optional()
+      .describe("If true, return only active (non-archived) tags."),
+    group_id: z
+      .string()
+      .optional()
+      .describe("Only return tags available in this group ID."),
+    type: z
+      .enum(["LABEL", "CAMPAIGN"])
+      .optional()
+      .describe("Filter by tag type."),
+    search: z
+      .string()
+      .optional()
+      .describe("Case-insensitive substring match against the tag name."),
+  },
+  async ({ active_only, group_id, type, search }) => {
+    const tags = await fetchTagMetadata();
+    const filtered = filterTags(tags, { active_only, group_id, type, search });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            { data: filtered, count: filtered.length, total: tags.length },
+            null,
+            2
+          ),
+        },
+      ],
+    };
   }
 );
 
@@ -214,7 +344,10 @@ server.tool(
 server.tool(
   "get_post_analytics",
   "Get post-level analytics (impressions, engagements, etc.) for posts within a date range. " +
+    "Supports filtering by Sprout tags via tag_ids or tagged_only. " +
+    "Responses include internal.tags.id by default so posts can be grouped by tag. " +
     "Supports pagination — always check paging.total_pages in the response and pull all pages. " +
+    "For a Tag Performance Report-style rollup, prefer get_tag_performance. " +
     "IMPORTANT: The page parameter must be in the request body, not as a URL query parameter.",
   {
     profile_ids: z
@@ -244,33 +377,257 @@ server.tool(
       .array(z.string())
       .optional()
       .describe(
-        "Additional fields to include. Valid: 'created_time', 'perma_link', 'text', 'post_type'. " +
-          "Defaults to all if omitted."
+        "Additional fields to include. Valid: 'created_time', 'perma_link', 'text', 'post_type', " +
+          "'network', 'customer_profile_id', 'guid', 'internal.tags.id'. " +
+          "Defaults to those fields if omitted."
+      ),
+    tag_ids: z
+      .array(z.union([z.string(), z.number()]))
+      .optional()
+      .describe(
+        "Only return posts that have at least one of these Sprout tag IDs. " +
+          "Use get_tags to discover IDs. Filter uses internal.tags.id.eq(...)."
+      ),
+    tagged_only: z
+      .boolean()
+      .optional()
+      .describe(
+        "If true, only return posts that have at least one tag. Ignored when tag_ids is provided."
       ),
     page: z
       .number()
       .optional()
       .describe("Page number (default: 1). Must be in request body, NOT URL."),
   },
-  async ({ profile_ids, metrics, created_time_start, created_time_end, fields, page }) => {
-    const body: Record<string, unknown> = {
-      filters: [
-        `customer_profile_id.eq(${profile_ids.join(", ")})`,
-        `created_time.in(${created_time_start}..${created_time_end})`,
-      ],
-      metrics,
-    };
+  async ({
+    profile_ids,
+    metrics,
+    created_time_start,
+    created_time_end,
+    fields,
+    tag_ids,
+    tagged_only,
+    page,
+  }) => {
+    const filters = [
+      `customer_profile_id.eq(${profile_ids.join(", ")})`,
+      `created_time.in(${created_time_start}..${created_time_end})`,
+    ];
 
-    if (fields && fields.length > 0) {
-      body.fields = fields;
-    } else {
-      body.fields = ["created_time", "perma_link", "text", "post_type"];
+    const parsedTagIds = parseTagIds(tag_ids);
+    if (parsedTagIds.length > 0) {
+      filters.push(`internal.tags.id.eq(${parsedTagIds.join(", ")})`);
+    } else if (tagged_only) {
+      filters.push("internal.tags.id.exists(true)");
     }
+
+    const body: Record<string, unknown> = {
+      filters,
+      metrics,
+      fields:
+        fields && fields.length > 0
+          ? fields
+          : DEFAULT_POST_FIELDS,
+    };
 
     if (page) body.page = page;
 
     const data = await sproutRequest("POST", "/analytics/posts", body);
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  }
+);
+
+server.tool(
+  "get_tag_performance",
+  "Automatically pull Tag Performance Report-style analytics: fetch tagged posts in a date range, " +
+    "resolve tag names, and aggregate lifetime metrics by tag (and optionally by network). " +
+    "Replaces exporting a tag report from Sprout for post insights. " +
+    "Use get_tags first if you need to discover tag names/IDs. " +
+    "If tag_ids and tag_names are omitted, every tagged post in the window is rolled up. " +
+    "A post with multiple tags contributes its full metrics to each tag. " +
+    "Pages through the Posts Analytics API automatically.",
+  {
+    profile_ids: z
+      .array(z.string())
+      .describe(
+        "Array of customer_profile_id values to include. Use get_profiles to discover IDs."
+      ),
+    created_time_start: z
+      .string()
+      .describe(
+        "Start of the published-date range in ISO 8601 format (e.g. '2026-08-01T00:00:00')."
+      ),
+    created_time_end: z
+      .string()
+      .describe(
+        "End of the published-date range in ISO 8601 format (e.g. '2026-08-31T23:59:59')."
+      ),
+    tag_ids: z
+      .array(z.union([z.string(), z.number()]))
+      .optional()
+      .describe(
+        "Optional Sprout tag IDs to include. Combined with tag_names. Use get_tags to look these up."
+      ),
+    tag_names: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Optional tag names to resolve (case-insensitive exact match, then unique substring). " +
+          "Ambiguous names are returned as an error listing candidates."
+      ),
+    metrics: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Post metrics to aggregate. Defaults to impressions, engagements, reactions, " +
+          "video views, saves, comments, shares, and Facebook post link clicks. " +
+          "INVALID: 'lifetime.reach', 'lifetime.comments', 'lifetime.shares'."
+      ),
+    exclude_post_types: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Post types to drop before aggregation, e.g. ['INSTAGRAM_STORY']."
+      ),
+    group_by_network: z
+      .boolean()
+      .optional()
+      .describe("If true, also break each tag down by social network."),
+    top_posts_per_tag: z
+      .number()
+      .optional()
+      .describe("How many top posts to include per tag (default: 5)."),
+    sort_by: z
+      .enum([
+        "lifetime.impressions",
+        "lifetime.engagements",
+        "lifetime.reactions",
+        "post_count",
+        "engagement_rate",
+      ])
+      .optional()
+      .describe("Sort tags and top posts by this metric (default: lifetime.impressions)."),
+    max_pages: z
+      .number()
+      .optional()
+      .describe(
+        "Max Posts Analytics pages to fetch (50 posts per page). Default 40. " +
+          "Response sets truncated=true if more pages remain."
+      ),
+  },
+  async ({
+    profile_ids,
+    created_time_start,
+    created_time_end,
+    tag_ids,
+    tag_names,
+    metrics,
+    exclude_post_types,
+    group_by_network,
+    top_posts_per_tag,
+    sort_by,
+    max_pages,
+  }) => {
+    const tagMetaList = await fetchTagMetadata();
+    const tagMeta = new Map(tagMetaList.map((tag) => [tag.tag_id, tag]));
+
+    const requestedIds = parseTagIds(tag_ids);
+    let unmatched: string[] = [];
+    let ambiguous: Record<string, TagMeta[]> = {};
+
+    if (tag_names && tag_names.length > 0) {
+      const resolved = resolveTagNames(tagMetaList, tag_names);
+      unmatched = resolved.unmatched;
+      ambiguous = resolved.ambiguous;
+      for (const tag of resolved.matched) {
+        if (!requestedIds.includes(tag.tag_id)) {
+          requestedIds.push(tag.tag_id);
+        }
+      }
+    }
+
+    if (unmatched.length > 0 || Object.keys(ambiguous).length > 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                error: "Could not uniquely resolve one or more tag names.",
+                unmatched_tag_names: unmatched,
+                ambiguous_tag_names: Object.fromEntries(
+                  Object.entries(ambiguous).map(([name, candidates]) => [
+                    name,
+                    candidates.map((tag) => ({
+                      tag_id: tag.tag_id,
+                      text: tag.text,
+                      type: tag.type,
+                      active: tag.active,
+                    })),
+                  ])
+                ),
+                hint: "Pass explicit tag_ids from get_tags, or use a more specific tag_name.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const filters = [
+      `customer_profile_id.eq(${profile_ids.join(", ")})`,
+      `created_time.in(${created_time_start}..${created_time_end})`,
+    ];
+
+    if (requestedIds.length > 0) {
+      filters.push(`internal.tags.id.eq(${requestedIds.join(", ")})`);
+    } else {
+      filters.push("internal.tags.id.exists(true)");
+    }
+
+    const body: Record<string, unknown> = {
+      filters,
+      metrics: metrics && metrics.length > 0 ? metrics : DEFAULT_POST_METRICS,
+      fields: DEFAULT_POST_FIELDS,
+      limit: 50,
+    };
+
+    const { posts, pagesFetched, pagesAvailable, truncated } =
+      await fetchPostAnalyticsPages({
+        body,
+        maxPages: max_pages ?? 40,
+      });
+
+    const excluded = new Set(
+      (exclude_post_types ?? []).map((type) => type.toUpperCase())
+    );
+    const filteredPosts =
+      excluded.size > 0
+        ? posts.filter(
+            (post) => !excluded.has((post.post_type ?? "").toUpperCase())
+          )
+        : posts;
+
+    const report = aggregateTagPerformance({
+      posts: filteredPosts,
+      tagMeta,
+      profileIds: profile_ids,
+      start: created_time_start,
+      end: created_time_end,
+      pagesFetched,
+      pagesAvailable,
+      truncated,
+      restrictToTagIds: requestedIds.length > 0 ? requestedIds : undefined,
+      topPostsPerTag: top_posts_per_tag ?? 5,
+      groupByNetwork: group_by_network ?? false,
+      sortBy: sort_by ?? "lifetime.impressions",
+    });
+
+    return {
+      content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+    };
   }
 );
 
