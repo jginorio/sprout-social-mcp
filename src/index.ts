@@ -10,10 +10,12 @@ import {
   type AnalyticsPost,
   type TagMeta,
 } from "./tag-performance.js";
+import { extractCustomerIds, fetchWithRetry } from "./sprout-http.js";
 
 const SPROUT_API_BASE = "https://api.sproutsocial.com";
+const PAGE_GAP_MS = 250;
 
-function getConfig() {
+function getApiKey(): string {
   const apiKey = process.env.SPROUT_SOCIAL_API_KEY;
   if (!apiKey) {
     throw new Error(
@@ -21,16 +23,47 @@ function getConfig() {
         "Set it to your Sprout Social API token."
     );
   }
+  return apiKey;
+}
 
-  const customerId = process.env.SPROUT_SOCIAL_CUSTOMER_ID;
-  if (!customerId) {
+let cachedCustomerId: string | undefined;
+
+async function getCustomerId(): Promise<string> {
+  if (cachedCustomerId) return cachedCustomerId;
+
+  if (process.env.SPROUT_SOCIAL_CUSTOMER_ID) {
+    cachedCustomerId = process.env.SPROUT_SOCIAL_CUSTOMER_ID;
+    return cachedCustomerId;
+  }
+
+  const payload = await sproutMetadataRequest("/metadata/client");
+  const customers = extractCustomerIds(payload);
+  if (customers.length === 0) {
     throw new Error(
-      "SPROUT_SOCIAL_CUSTOMER_ID environment variable is required. " +
-        "Set it to your Sprout Social customer ID."
+      "No Sprout Social customer IDs were found for this token. Set SPROUT_SOCIAL_CUSTOMER_ID."
+    );
+  }
+  if (customers.length > 1) {
+    const listed = customers
+      .map((customer) => `${customer.name ?? "unnamed"} (${customer.id})`)
+      .join(", ");
+    throw new Error(
+      `This token can access multiple customers (${listed}). Set SPROUT_SOCIAL_CUSTOMER_ID to pick one.`
     );
   }
 
-  return { apiKey, customerId };
+  cachedCustomerId = customers[0].id;
+  return cachedCustomerId;
+}
+
+async function parseSproutResponse(response: Response): Promise<unknown> {
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Sprout Social API error (${response.status}): ${errorText}`
+    );
+  }
+  return response.json();
 }
 
 async function sproutRequest(
@@ -38,7 +71,8 @@ async function sproutRequest(
   path: string,
   body?: Record<string, unknown>
 ): Promise<unknown> {
-  const { apiKey, customerId } = getConfig();
+  const apiKey = getApiKey();
+  const customerId = await getCustomerId();
   const url = `${SPROUT_API_BASE}/v1/${customerId}${path}`;
 
   const headers: Record<string, string> = {
@@ -53,23 +87,15 @@ async function sproutRequest(
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetch(url, options);
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Sprout Social API error (${response.status}): ${errorText}`
-    );
-  }
-
-  return response.json();
+  const response = await fetchWithRetry(url, options);
+  return parseSproutResponse(response);
 }
 
 async function sproutMetadataRequest(path: string): Promise<unknown> {
-  const { apiKey } = getConfig();
+  const apiKey = getApiKey();
   const url = `${SPROUT_API_BASE}/v1${path}`;
 
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -77,14 +103,7 @@ async function sproutMetadataRequest(path: string): Promise<unknown> {
     },
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Sprout Social API error (${response.status}): ${errorText}`
-    );
-  }
-
-  return response.json();
+  return parseSproutResponse(response);
 }
 
 const DEFAULT_POST_METRICS = [
@@ -132,16 +151,26 @@ async function fetchPostAnalyticsPage(body: Record<string, unknown>) {
   )) as PostsAnalyticsResponse;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchPostAnalyticsPages(options: {
   body: Record<string, unknown>;
   startPage?: number;
   maxPages: number;
+  guidCursor?: string;
 }): Promise<{
   posts: AnalyticsPost[];
   pagesFetched: number;
   pagesAvailable: number;
   truncated: boolean;
+  next_guid_cursor?: string;
 }> {
+  if (options.guidCursor) {
+    return fetchPostAnalyticsByGuid(options);
+  }
+
   const startPage = options.startPage ?? 1;
   const first = await fetchPostAnalyticsPage({
     ...options.body,
@@ -152,6 +181,7 @@ async function fetchPostAnalyticsPages(options: {
   const lastPage = Math.min(pagesAvailable, startPage + options.maxPages - 1);
 
   for (let page = startPage + 1; page <= lastPage; page++) {
+    await sleep(PAGE_GAP_MS);
     const next = await fetchPostAnalyticsPage({
       ...options.body,
       page,
@@ -160,11 +190,72 @@ async function fetchPostAnalyticsPages(options: {
   }
 
   const pagesFetched = Math.max(0, lastPage - startPage + 1);
+  const lastGuid = posts[posts.length - 1]?.guid;
   return {
     posts,
     pagesFetched,
     pagesAvailable,
     truncated: lastPage < pagesAvailable,
+    next_guid_cursor: lastGuid,
+  };
+}
+
+async function fetchPostAnalyticsByGuid(options: {
+  body: Record<string, unknown>;
+  maxPages: number;
+  guidCursor?: string;
+}): Promise<{
+  posts: AnalyticsPost[];
+  pagesFetched: number;
+  pagesAvailable: number;
+  truncated: boolean;
+  next_guid_cursor?: string;
+}> {
+  const posts: AnalyticsPost[] = [];
+  let cursor = options.guidCursor;
+  let pagesFetched = 0;
+  let truncated = false;
+
+  for (let page = 0; page < options.maxPages; page++) {
+    if (page > 0) await sleep(PAGE_GAP_MS);
+
+    const filters = [
+      ...((options.body.filters as string[]) ?? []),
+    ].filter((filter) => !filter.startsWith("guid.gt("));
+    if (cursor) filters.push(`guid.gt(${cursor})`);
+
+    const next = await fetchPostAnalyticsPage({
+      ...options.body,
+      filters,
+      sort: ["guid:asc"],
+      page: undefined,
+    });
+    const batch = next.data ?? [];
+    pagesFetched += 1;
+    posts.push(...batch);
+
+    if (batch.length === 0) {
+      truncated = false;
+      break;
+    }
+
+    cursor = batch[batch.length - 1]?.guid ?? cursor;
+    const hitPageLimit = batch.length >= 50;
+    if (!hitPageLimit) {
+      truncated = false;
+      break;
+    }
+    if (page === options.maxPages - 1) {
+      truncated = true;
+    }
+  }
+
+  return {
+    posts,
+    pagesFetched,
+    pagesAvailable: pagesFetched,
+    truncated,
+    next_guid_cursor: cursor,
   };
 }
 
@@ -346,7 +437,7 @@ server.tool(
   "Get post-level analytics (impressions, engagements, etc.) for posts within a date range. " +
     "Supports filtering by Sprout tags via tag_ids or tagged_only. " +
     "Responses include internal.tags.id by default so posts can be grouped by tag. " +
-    "Supports sort (e.g. lifetime.impressions:desc), timezone, page, and guid_cursor for walking past the ~10k page cap. " +
+    "Supports sort (e.g. lifetime.impressions:desc), timezone, page, all_pages auto-pagination, and guid_cursor for walking past the ~10k page cap. " +
     "For a Tag Performance Report-style rollup, prefer get_tag_performance. " +
     "IMPORTANT: The page parameter must be in the request body, not as a URL query parameter.",
   {
@@ -422,7 +513,18 @@ server.tool(
     page: z
       .number()
       .optional()
-      .describe("Page number (default: 1). Must be in request body, NOT URL. Prefer guid_cursor for large ranges."),
+      .describe("Page number (default: 1). Must be in request body, NOT URL. Ignored when all_pages is true unless starting a page walk."),
+    all_pages: z
+      .boolean()
+      .optional()
+      .describe(
+        "If true, follow pagination automatically and return every post up to max_pages. " +
+          "Uses page numbers, or guid_cursor walks when guid_cursor is provided."
+      ),
+    max_pages: z
+      .number()
+      .optional()
+      .describe("Cap on pages fetched when all_pages is true (default 40, 50 posts per page)."),
   },
   async ({
     profile_ids,
@@ -437,6 +539,8 @@ server.tool(
     guid_cursor,
     limit,
     page,
+    all_pages,
+    max_pages,
   }) => {
     const filters = [
       `customer_profile_id.eq(${profile_ids.join(", ")})`,
@@ -471,6 +575,36 @@ server.tool(
 
     if (timezone) body.timezone = timezone;
     if (limit) body.limit = limit;
+
+    if (all_pages) {
+      const result = await fetchPostAnalyticsPages({
+        body,
+        startPage: page ?? 1,
+        maxPages: max_pages ?? 40,
+        guidCursor: guid_cursor,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                data: result.posts,
+                paging: {
+                  pages_fetched: result.pagesFetched,
+                  pages_available: result.pagesAvailable,
+                  truncated: result.truncated,
+                  next_guid_cursor: result.next_guid_cursor,
+                },
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
     if (page) body.page = page;
 
     const data = await sproutRequest("POST", "/analytics/posts", body);
@@ -886,7 +1020,8 @@ server.tool(
       .describe("A public HTTP/HTTPS URL of the media file to upload."),
   },
   async ({ media_url }) => {
-    const { apiKey, customerId } = getConfig();
+    const apiKey = getApiKey();
+    const customerId = await getCustomerId();
     const url = `${SPROUT_API_BASE}/v1/${customerId}/media`;
 
     const formData = new FormData();
