@@ -346,7 +346,7 @@ server.tool(
   "Get post-level analytics (impressions, engagements, etc.) for posts within a date range. " +
     "Supports filtering by Sprout tags via tag_ids or tagged_only. " +
     "Responses include internal.tags.id by default so posts can be grouped by tag. " +
-    "Supports pagination — always check paging.total_pages in the response and pull all pages. " +
+    "Supports sort (e.g. lifetime.impressions:desc), timezone, page, and guid_cursor for walking past the ~10k page cap. " +
     "For a Tag Performance Report-style rollup, prefer get_tag_performance. " +
     "IMPORTANT: The page parameter must be in the request body, not as a URL query parameter.",
   {
@@ -394,10 +394,35 @@ server.tool(
       .describe(
         "If true, only return posts that have at least one tag. Ignored when tag_ids is provided."
       ),
+    sort: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Sort expressions, e.g. ['lifetime.impressions:desc'] or ['created_time:asc']. " +
+          "Ignored when guid_cursor is set (cursor mode always sorts by guid:asc)."
+      ),
+    timezone: z
+      .string()
+      .optional()
+      .describe(
+        "ICANN timezone for the created_time filter (e.g. 'America/New_York'). " +
+          "Response timestamps stay in UTC."
+      ),
+    guid_cursor: z
+      .string()
+      .optional()
+      .describe(
+        "Last post guid from a previous page. Uses guid.gt(...) so you can walk past the ~10k page-number cap. " +
+          "Pass the last guid from the prior response and keep calling until an empty page."
+      ),
+    limit: z
+      .number()
+      .optional()
+      .describe("Results per page (default 50, max 50 for posts)."),
     page: z
       .number()
       .optional()
-      .describe("Page number (default: 1). Must be in request body, NOT URL."),
+      .describe("Page number (default: 1). Must be in request body, NOT URL. Prefer guid_cursor for large ranges."),
   },
   async ({
     profile_ids,
@@ -407,6 +432,10 @@ server.tool(
     fields,
     tag_ids,
     tagged_only,
+    sort,
+    timezone,
+    guid_cursor,
+    limit,
     page,
   }) => {
     const filters = [
@@ -421,6 +450,10 @@ server.tool(
       filters.push("internal.tags.id.exists(true)");
     }
 
+    if (guid_cursor) {
+      filters.push(`guid.gt(${guid_cursor})`);
+    }
+
     const body: Record<string, unknown> = {
       filters,
       metrics,
@@ -430,6 +463,14 @@ server.tool(
           : DEFAULT_POST_FIELDS,
     };
 
+    if (guid_cursor) {
+      body.sort = ["guid:asc"];
+    } else if (sort && sort.length > 0) {
+      body.sort = sort;
+    }
+
+    if (timezone) body.timezone = timezone;
+    if (limit) body.limit = limit;
     if (page) body.page = page;
 
     const data = await sproutRequest("POST", "/analytics/posts", body);
